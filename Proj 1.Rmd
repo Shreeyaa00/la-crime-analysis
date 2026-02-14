@@ -1,0 +1,368 @@
+---
+title: "Post-Pandemic Crime Patterns in Los Angeles (2020-Present)"
+author: "Shreeya Vanka"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Introduction
+
+Public safety trends shifted significantly after 2020 due to social, economic, and policy changes.  
+This project analyzes official Los Angeles crime data (2020–Present) to understand patterns in violent vs non-violent crime.
+
+The goal is not only to explore trends, but to build an interpretable predictive model that estimates the probability of a crime being violent based on contextual and demographic features.
+
+### Project Objectives
+
+• Clean and preprocess a real-world public dataset  
+• Perform exploratory data analysis (EDA) to identify trends  
+• Conduct statistical hypothesis testing  
+• Build and evaluate a logistic regression classifier  
+• Interpret model outputs using odds ratios and feature importance  
+
+This project demonstrates end-to-end data science workflow using R.
+
+
+
+# 2. Load Libraries
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(skimr)
+library(pROC)
+```
+
+
+
+# 3. Load Dataset
+
+```{r}
+crime_raw <- read_csv("Crime_Data_from_2020_to_Present.csv")
+crime_clean <- crime_raw %>% clean_names()
+head(crime_clean)
+```
+
+## Dataset Overview
+
+Source: City of Los Angeles Open Data Portal  
+
+The dataset contains over 1 million reported crime incidents from 2020 to present.  
+Each row represents a reported crime event, including:
+
+• Date and time of occurrence  
+• Crime description  
+• Victim demographics  
+• Geographic reporting area  
+
+Because this is real-world administrative data, it contains missing values and inconsistencies that require preprocessing.
+
+
+
+# 4. Inspect Dataset
+
+```{r}
+glimpse(crime_clean)
+skim(crime_clean)
+dim(crime_clean)
+```
+
+
+# 5. Clean and Feature Engineering
+
+```{r}
+crime_clean <- crime_clean %>%
+  mutate(date_occ = parse_date_time(date_occ, orders = "mdy IMS p")) %>%
+  mutate(
+    year = year(date_occ),
+    month = month(date_occ),
+    month_name = month(date_occ, label = TRUE),
+    weekday = wday(date_occ, label = TRUE),
+    hour = hour(date_occ),
+    time_of_day = case_when(
+      hour >= 6 & hour < 12 ~ "Morning",
+      hour >= 12 & hour < 18 ~ "Afternoon",
+      hour >= 18 & hour < 24 ~ "Evening",
+      TRUE ~ "Night"
+    ),
+    vict_age = as.numeric(vict_age),
+    vict_age = if_else(vict_age < 5 | vict_age > 100, NA_real_, vict_age),
+    violent = if_else(crm_cd_desc %in% c("HOMICIDE","ROBBERY","ASSAULT","SEXUAL ASSAULT","KIDNAPPING"), 1, 0)
+  )
+
+# Drop unused factor levels to avoid glm errors
+crime_clean <- droplevels(crime_clean)
+```
+
+
+
+# 6. Exploratory Data Analysis (EDA)
+
+## 6.1 Crime Counts by Year
+
+```{r}
+crime_clean %>%
+  count(year) %>%
+  ggplot(aes(x = year, y = n)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "Crime Count by Year", x = "Year", y = "Number of Crimes")
+```
+**Interpretation:**  
+Crime counts fluctuate across years, reflecting potential effects of pandemic-related lockdowns, policy changes, and social mobility patterns.
+
+
+## 6.2 Violent Crime Proportion by Year
+
+```{r}
+crime_clean %>%
+  group_by(year) %>%
+  summarise(
+    violent_count = sum(violent, na.rm = TRUE),
+    total = n(),
+    violent_ratio = violent_count / total
+  ) %>%
+  ggplot(aes(x = year, y = violent_ratio)) +
+  geom_line(color = "firebrick") +
+  geom_point() +
+  labs(title = "Proportion of Violent Crimes by Year", y = "Proportion")
+```
+
+**Interpretation:**  
+The proportion of violent crimes remains relatively stable, though slight variations across years suggest changes in crime composition rather than overall volume alone.
+
+
+## 6.3 Violent Crimes by Time of Day
+
+```{r}
+crime_clean %>%
+  group_by(time_of_day) %>%
+  summarise(prob = mean(violent, na.rm = TRUE)) %>%
+  ggplot(aes(x = time_of_day, y = prob)) +
+  geom_col(fill = "darkorange") +
+  labs(title = "Probability of Violent Crime by Time of Day", y = "Probability")
+```
+**Interpretation:**  
+Evening and night hours show higher probabilities of violent crime, aligning with criminology research linking violent incidents to reduced visibility and increased social activity.
+
+
+
+# 7. Statistical Analysis
+
+## 7.1 Chi-Square Test: Violent Crime vs Year
+
+```{r}
+crime_table <- table(crime_clean$violent, crime_clean$year)
+chisq_result <- chisq.test(crime_table)
+chisq_result
+```
+
+## 7.2 Chi-Square Test: Violent Crime vs Time of Day
+
+```{r}
+crime_table_time <- table(crime_clean$violent, crime_clean$time_of_day)
+chisq_time <- chisq.test(crime_table_time)
+chisq_time
+```
+
+Logistic regression was selected because the target variable (violent vs non-violent) is binary.  
+The model estimates the log-odds of a crime being violent based on demographic and contextual predictors.
+
+
+
+# 8. Logistic Regression: Predict Violent Crimes
+
+## 8.1 Prepare Factors (Automatically remove single-level factors)
+
+```{r}
+factor_vars <- c("time_of_day", "weekday", "area_name", "year")
+
+# Keep only factors with >= 2 levels
+valid_factors <- factor_vars[sapply(crime_clean[factor_vars], function(x) nlevels(as.factor(x))) >= 2]
+
+crime_model <- crime_clean %>%
+  mutate(across(all_of(valid_factors), as.factor))
+```
+
+## 8.2 Fit Logistic Model
+
+```{r}
+# Build formula dynamically
+model_formula <- as.formula(paste("violent ~ vict_age +", paste(valid_factors, collapse = " + ")))
+
+violent_model <- glm(
+  model_formula,
+  data = crime_model,
+  family = "binomial"
+)
+
+summary(violent_model)
+```
+### Model Interpretation
+
+Key observations:
+
+• Victim age shows measurable association with violent crime probability.  
+• Certain geographic areas exhibit significantly different odds of violent crime.  
+• Time-based predictors (weekday/year) contribute to predictive power.
+
+Because logistic regression outputs log-odds, we convert coefficients to **odds ratios** for interpretability.
+
+
+
+# 9. Predict Probabilities and Evaluate Model
+
+```{r fig.width=8, fig.height=6, echo=TRUE}
+# Use only rows actually used in the model (drop NAs in predictors)
+predictors <- c("vict_age", valid_factors)  # all predictors in the model
+crime_model_complete <- crime_model %>% drop_na(all_of(predictors))
+
+#  Predict probabilities and classes 
+crime_model_complete$pred_prob <- predict(violent_model, newdata = crime_model_complete, type = "response")
+crime_model_complete$pred_class <- if_else(crime_model_complete$pred_prob >= 0.5, 1, 0)
+
+#  Confusion Matrix
+conf_matrix <- table(Actual = crime_model_complete$violent,
+                     Predicted = crime_model_complete$pred_class)
+conf_matrix
+
+#  Accuracy 
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+accuracy
+
+#  ROC Curve & AUC 
+roc_curve <- roc(crime_model_complete$violent, crime_model_complete$pred_prob)
+auc_value <- auc(roc_curve)
+auc_value
+
+# Plot ROC Curve 
+plot(roc_curve,
+     main = paste("ROC Curve for Violent Crime Prediction (AUC =", round(auc_value, 3), ")"),
+     col = "darkblue", lwd = 3)
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+#  Histogram of Predicted Probabilities by Class
+ggplot(crime_model_complete, aes(x = pred_prob, fill = factor(violent))) +
+  geom_histogram(bins = 40, alpha = 0.6, position = "identity") +
+  labs(title = "Distribution of Predicted Probabilities",
+       x = "Predicted Probability",
+       y = "Count",
+       fill = "Actual Violent (1=Yes)") +
+  scale_fill_manual(values = c("lightblue", "firebrick")) +
+  theme_minimal()
+
+```
+
+### Model Performance
+
+The model achieves:
+
+• Accuracy ≈ `r round(accuracy,3)`  
+• AUC ≈ `r round(auc_value,3)`
+
+Although accuracy appears high, the dataset is imbalanced (non-violent crimes dominate).  
+Therefore, AUC is a more reliable metric.
+
+An AUC around 0.62 indicates moderate predictive ability — better than random guessing (0.50), but with room for improvement.
+
+
+
+# 10. Model Enhancements: Train/Test Split, Odds Ratios, Feature Importance
+
+```{r echo=TRUE, fig.width=8, fig.height=6}
+set.seed(123)  
+
+# Train/Test Split (70/30)
+train_index <- sample(seq_len(nrow(crime_model_complete)), size = 0.7*nrow(crime_model_complete))
+train_data <- crime_model_complete[train_index, ]
+test_data <- crime_model_complete[-train_index, ]
+
+# Fit model on training data
+train_model <- glm(model_formula, data = train_data, family = "binomial")
+
+# Predict on test data 
+test_data$pred_prob <- predict(train_model, newdata = test_data, type = "response")
+test_data$pred_class <- if_else(test_data$pred_prob >= 0.5, 1, 0)
+
+# Confusion Matrix and Accuracy 
+conf_matrix_test <- table(Actual = test_data$violent, Predicted = test_data$pred_class)
+conf_matrix_test
+accuracy_test <- sum(diag(conf_matrix_test)) / sum(conf_matrix_test)
+accuracy_test
+
+# ROC and AUC on Test Data
+roc_test <- roc(test_data$violent, test_data$pred_prob)
+auc_test <- auc(roc_test)
+auc_test
+plot(roc_test,
+     main = paste("Test ROC Curve (AUC =", round(auc_test, 3), ")"),
+     col = "darkgreen", lwd = 3)
+abline(a=0, b=1, lty=2, col="gray")
+
+# Odds Ratios
+odds_ratios <- exp(coef(train_model))
+conf_int <- exp(confint(train_model))
+odds_df <- data.frame(
+  Variable = names(odds_ratios),
+  OR = odds_ratios,
+  Lower = conf_int[,1],
+  Upper = conf_int[,2]
+)
+
+#Odds Ratio Plot 
+ggplot(odds_df[-1,], aes(x = reorder(Variable, OR), y = OR)) +  # exclude intercept
+  geom_point(color = "firebrick", size = 3) +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.2, color = "black") +
+  coord_flip() +
+  labs(title = "Odds Ratios with 95% CI",
+       x = "Predictor",
+       y = "Odds Ratio") +
+  theme_minimal()
+
+#Feature Importance 
+ggplot(odds_df[-1,], aes(x = reorder(Variable, abs(OR-1)), y = abs(OR-1))) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance (|OR - 1|)",
+       x = "Predictor",
+       y = "|OR - 1|") +
+  theme_minimal()
+```
+
+# 11. Key Findings
+
+1. Violent crime distribution varies significantly across years (Chi-square test significant).  
+2. Evening and night periods are associated with higher violent crime probability.  
+3. Geographic area is a strong structural predictor.  
+4. Logistic regression achieves moderate predictive power (AUC ≈ 0.63).  
+5. Feature importance analysis highlights contextual variables over demographic ones.
+
+
+# 12. Limitations
+
+• The dataset reflects reported crimes only (potential reporting bias).  
+• Class imbalance affects model discrimination ability.  
+• Logistic regression assumes linear log-odds relationships.  
+• Additional features (economic indicators, policing data) could improve performance.
+
+
+# 13. Conclusion
+
+This project demonstrates a full data science pipeline:
+
+• Real-world data cleaning  
+• Feature engineering  
+• Statistical hypothesis testing  
+• Predictive modeling  
+• Model interpretation and visualization  
+
+The analysis shows that violent crime patterns are influenced by temporal and geographic factors.  
+While the predictive performance is moderate, the model provides interpretable insights that could support policy evaluation and public awareness efforts.
+
+Future work could explore advanced models such as Random Forests or Gradient Boosting to improve discrimination performance.
+
+
